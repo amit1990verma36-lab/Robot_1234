@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Robot Assistant</title>
+<style>
+  :root{--bg:#0f1220;--card:#1a1f36;--ac:#4f8cff;--on:#22c55e;--off:#334155;--tx:#e8ecff}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--tx);padding:14px;max-width:560px;margin:auto}
+  h1{font-size:20px;margin:6px 0 12px}
+  .card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  button{border:0;border-radius:10px;padding:12px 14px;font-size:15px;color:#fff;background:var(--ac);cursor:pointer;flex:1;min-width:110px}
+  button.dev{background:var(--off);font-size:16px;padding:18px 8px}
+  button.dev.on{background:var(--on)}
+  button.sec{background:var(--off)}
+  button.live{background:#ef4444}
+  input[type=text],input[type=password]{width:100%;padding:11px;border-radius:10px;border:1px solid #334155;background:#0f1220;color:var(--tx);font-size:15px}
+  input[type=range]{width:100%}
+  #status{font-size:13px;opacity:.85;margin-top:8px}
+  #log{height:220px;overflow:auto;font-size:14px;line-height:1.5}
+  .me{color:#9ec1ff}.bot{color:#b7f7c7}.sys{color:#94a3b8;font-size:12px}.err{color:#fca5a5;font-size:12px}
+  label{font-size:13px;opacity:.9}
+  .face{font-size:44px;text-align:center}
+</style>
+</head>
+<body>
+<h1>🤖 ESP32 Robot Assistant</h1>
+
+<div class="card">
+  <div class="row">
+    <button id="btBtn" onclick="toggleBLE()">🔵 Bluetooth Connect</button>
+    <button id="vBtn" class="sec" onclick="toggleAssistant()">🎤 Voice Assistant: OFF</button>
+  </div>
+  <div id="status">Bluetooth: disconnected</div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <button class="dev" id="d1" onclick="toggleDev(0)">💡 Bulb 1</button>
+    <button class="dev" id="d2" onclick="toggleDev(1)">💡 Bulb 2</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="dev" id="d3" onclick="toggleDev(2)">💡 Bulb 3</button>
+    <button class="dev" id="d4" onclick="toggleDev(3)">🌀 Fan</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="sec" onclick="allDev(true)">Sab ON</button>
+    <button class="sec" onclick="allDev(false)">Sab OFF</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="face" id="faceIcon">😐</div>
+  <div class="row" style="margin-top:8px">
+    <button class="sec" onclick="setMood('h')">😊</button>
+    <button class="sec" onclick="setMood('s')">😢</button>
+    <button class="sec" onclick="setMood('a')">😠</button>
+    <button class="sec" onclick="setMood('l')">😂</button>
+    <button class="sec" onclick="setMood('u')">😲</button>
+    <button class="sec" onclick="setMood('v')">😍</button>
+    <button class="sec" onclick="setMood('z')">😴</button>
+    <button class="sec" onclick="setMood('n')">😐</button>
+  </div>
+  <label style="display:block;margin-top:10px"><input type="checkbox" id="keep" checked> Face hamesha dikhao (20 sec ke baad bhi)</label>
+</div>
+
+<div class="card">
+  <label>Cooling fan speed: <b id="fv">100</b>%</label>
+  <input type="range" id="fs" min="0" max="100" value="100" oninput="fv.textContent=this.value" onchange="sendRaw('#F,'+this.value+'\n')">
+  <div class="row" style="margin-top:8px">
+    <button class="sec" onclick="syncTime()">🕒 Time sync</button>
+    <button class="sec" onclick="syncWeather()">🌤 Weather sync</button>
+  </div>
+</div>
+
+<div class="card">
+  <label>OpenAI API Key (sirf is browser mein save hogi)</label>
+  <input type="password" id="key" placeholder="sk-..." onchange="localStorage.setItem('oaikey',this.value)">
+  <label style="display:block;margin-top:8px">Model</label>
+  <input type="text" id="model" value="gpt-4o-mini" onchange="localStorage.setItem('oaimodel',this.value)">
+  <div class="row" style="margin-top:8px"><button class="sec" onclick="testKey()">🔑 API key test karo</button></div>
+</div>
+
+<div class="card">
+  <div id="log"></div>
+  <div class="row" style="margin-top:8px">
+    <input type="text" id="txt" placeholder="Kuch bhi poochho ya likho..." style="flex:3" onkeydown="if(event.key==='Enter')sendText()">
+    <button onclick="sendText()" style="flex:1;min-width:70px">Bhejo</button>
+  </div>
+</div>
+
+<script>
+// ================= BLE =================
+const SVC='6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RXU='6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+let dev=null, rx=null, connected=false, q=Promise.resolve();
+let curMood='n';
+const $=id=>document.getElementById(id);
+const faces={n:'😐',h:'😊',s:'😢',a:'😠',l:'😂',c:'😭',u:'😲',v:'😍',z:'😴',e:'👂',t:'🤔'};
+
+function log(t,c='sys'){const d=document.createElement('div');d.className=c;d.textContent=t;$('log').appendChild(d);$('log').scrollTop=1e9}
+function setStatus(t){$('status').textContent=t}
+
+function sendRaw(s){
+  if(!rx) return;
+  const b=new TextEncoder().encode(s);
+  q=q.then(async()=>{
+    for(let i=0;i<b.length;i+=20){
+      const ch=b.slice(i,i+20);
+      if(rx.writeValueWithoutResponse) await rx.writeValueWithoutResponse(ch);
+      else await rx.writeValue(ch);
+    }
+  }).catch(e=>console.warn(e));
+}
+function send(c){sendRaw(c)}
+
+async function toggleBLE(){
+  if(connected){dev&&dev.gatt.disconnect();return}
+  if(!navigator.bluetooth){alert('Web Bluetooth sirf Chrome/Edge (Android ya desktop) mein chalta hai.');return}
+  try{
+    dev=await navigator.bluetooth.requestDevice({filters:[{namePrefix:'ESP32_Face'}],optionalServices:[SVC]});
+    dev.addEventListener('gattserverdisconnected',onDisc);
+    setStatus('Connecting...');
+    const s=await dev.gatt.connect();
+    const svc=await s.getPrimaryService(SVC);
+    rx=await svc.getCharacteristic(RXU);
+    connected=true;
+    $('btBtn').textContent='🔴 Disconnect';$('btBtn').classList.add('live');
+    setStatus('Bluetooth: connected → '+dev.name);
+    log('ESP32 se connect ho gaya','sys');
+    setTimeout(()=>{syncTime();syncWeather();setMood('h')},400);
+  }catch(e){setStatus('Connect nahi hua: '+e.message)}
+}
+function onDisc(){
+  connected=false;rx=null;
+  $('btBtn').textContent='🔵 Bluetooth Connect';$('btBtn').classList.remove('live');
+  setStatus('Bluetooth: disconnected');log('Bluetooth disconnect','sys');
+}
+
+// ================= Devices =================
+const st=[false,false,false,false];
+const names=['Bulb 1','Bulb 2','Bulb 3','Fan'];
+function paint(){for(let i=0;i<4;i++)$('d'+(i+1)).classList.toggle('on',st[i])}
+function setDev(i,on){st[i]=on;send(String(on?i+1:i+5));paint()}
+function toggleDev(i){setDev(i,!st[i])}
+function allDev(on){for(let i=0;i<4;i++)st[i]=on;send(on?'9':'0');paint()}
+
+// ================= Face =================
+function setMood(c){curMood=c;$('faceIcon').textContent=faces[c]||'😐';send(c)}
+setInterval(()=>{if(connected&&$('keep').checked&&!busy)send(curMood)},8000);
+
+// ================= Time / Weather =================
+function syncTime(){
+  const d=new Date();
+  sendRaw(`#T,${d.getFullYear()},${d.getMonth()+1},${d.getDate()},${d.getHours()},${d.getMinutes()},${d.getSeconds()}\n`);
+}
+function syncWeather(){
+  if(!navigator.geolocation)return;
+  navigator.geolocation.getCurrentPosition(async p=>{
+    try{
+      const u=`https://api.open-meteo.com/v1/forecast?latitude=${p.coords.latitude}&longitude=${p.coords.longitude}&current=temperature_2m,relative_humidity_2m`;
+      const j=await (await fetch(u)).json();
+      sendRaw(`#W,${j.current.temperature_2m},${Math.round(j.current.relative_humidity_2m)}\n`);
+    }catch(e){}
+  },()=>{});
+}
+setInterval(()=>{if(connected){syncTime();syncWeather()}},600000);
+
+// ================= Speech out (lamba jawab bhi bolega) =================
+function speak(text,m){
+  return new Promise(res=>{
+    setMood(m||'n');send('m');
+    speechSynthesis.cancel();
+    const parts=(String(text).match(/[^.!?।\n]+[.!?।]?/g)||[String(text)]).map(s=>s.trim()).filter(Boolean);
+    const lang=/[\u0900-\u097F]/.test(text)?'hi-IN':'en-IN';
+    let i=0;
+    const next=()=>{
+      if(i>=parts.length){send('x');res();return}
+      const u=new SpeechSynthesisUtterance(parts[i++]);
+      u.lang=lang;u.rate=1;
+      u.onend=next;u.onerror=next;
+      speechSynthesis.speak(u);
+    };
+    next();
+  });
+}
+
+// ================= Local voice commands (device) =================
+function localCmd(t){
+  t=t.toLowerCase();
+  const fan=/(\bfan\b|pankha|पंखा|पंखे|फैन)/.test(t);
+  const bulb=/(bulb|बल्ब|\blight|लाइट|batti|बत्ती)/.test(t);
+  const all=/(\bsab\b|saari|sabhi|\ball\b|सब|सारी|सभी)/.test(t);
+  if(!fan&&!bulb&&!all)return null;
+  const off=/(\boff\b|ऑफ|बंद|band|bujha|बुझा|hata|\bstop\b)/.test(t);
+  const on=/(\bon\b|ऑन|चालू|chalu|\bstart\b|jala|जला|खोल|kholo|laga)/.test(t);
+  if(!on&&!off)return null;
+  const wantOn=!off;
+  if(all&&!fan&&(bulb||/(kuch|सब|sab|all)/.test(t))){allDev(wantOn);return {msg:wantOn?'Sab kuch chalu kar diya':'Sab kuch band kar diya',m:'h'}}
+  const n1=/(\b1\b|\bone\b|\bek\b|एक|वन|pehla|पहला)/.test(t);
+  const n2=/(\b2\b|\btwo\b|\bdo\b|दो|टू|dusra|दूसरा)/.test(t);
+  const n3=/(\b3\b|\bthree\b|\bteen\b|तीन|थ्री|tisra|तीसरा)/.test(t);
+  let hit=[];
+  if(fan)hit.push(3);
+  if(bulb){
+    if(n1)hit.push(0);if(n2)hit.push(1);if(n3)hit.push(2);
+    if(!n1&&!n2&&!n3&&!fan){
+      if(all){[0,1,2].forEach(i=>hit.push(i))}
+      else return {msg:'Kaun sa bulb? Ek, do ya teen?',m:'t'};
+    }
+  }
+  if(!hit.length)return null;
+  hit.forEach(i=>setDev(i,wantOn));
+  return {msg:hit.map(i=>names[i]).join(' aur ')+(wantOn?' chalu kar diya':' band kar diya'),m:'h'};
+}
+
+// ================= Offline fallbacks =================
+function calcAnswer(t){
+  let s=t.toLowerCase()
+    .replace(/(calculate|kitna hota hai|kitne hote hain|kya hai|equals?|बराबर|=|\?)/g,' ')
+    .replace(/(plus|jod|जोड़)/g,'+').replace(/(minus|ghata|घटा)/g,'-')
+    .replace(/(multiplied by|times|into|guna|गुणा|[x×])/g,'*').replace(/(divided by|bata|भाग|÷)/g,'/')
+    .replace(/\^/g,'**').replace(/,/g,'').trim();
+  if(!/^[\d\s+\-*/().%]+$/.test(s)||!/\d/.test(s)||!/[+\-*/%]/.test(s))return null;
+  try{const v=Function('"use strict";return ('+s+')')();
+    if(typeof v==='number'&&isFinite(v))return 'Jawab hai '+(+v.toFixed(6));}catch(e){}
+  return null;
+}
+function clockAnswer(t){
+  t=t.toLowerCase();const d=new Date();
+  if(/(time|samay|baje|टाइम|समय|बजे)/.test(t))
+    return 'Abhi samay hai '+d.toLocaleTimeString('hi-IN',{hour:'numeric',minute:'2-digit'});
+  if(/(date|tarikh|tareekh|तारीख|today|aaj|आज|\bday\b|din|दिन)/.test(t))
+    return 'Aaj '+d.toLocaleDateString('hi-IN',{weekday:'long',day:'numeric',month:'long',year:'numeric'})+' hai';
+  return null;
+}
+async function wiki(text){
+  const dev=/[\u0900-\u097F]/.test(text);
+  const clean=text.replace(/(what is|who is|who was|tell me about|explain|kya hai|kaun hai|kaun tha|batao|bataiye|बताओ|क्या है|कौन है|के बारे में|about|\?)/gi,' ').trim();
+  if(!clean)return null;
+  for(const lang of dev?['hi','en']:['en','hi']){
+    try{
+      const u=`https://${lang}.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(clean)}&gsrlimit=1&prop=extracts&exintro=1&explaintext=1&exsentences=3&format=json&origin=*`;
+      const j=await (await fetch(u)).json();
+      const p=j.query&&Object.values(j.query.pages)[0];
+      if(p&&p.extract&&p.extract.length>30)return p.extract.replace(/\s+/g,' ');
+    }catch(e){}
+  }
+  return null;
+}
+async function fallback(text){
+  return calcAnswer(text)||clockAnswer(text)||await wiki(text);
+}
+
+// ================= OpenAI =================
+let history=[], lastErr='';
+function buildSys(){
+  const d=new Date();
+  return `Tum ek smart, dostana, thoda mazaakiya desi robot assistant ho. Tumhara chehra ESP32 ke OLED par expression dikhata hai.
+Tum har topic par sahi, saaf aur gehra jawab de sakte ho: GK, science, maths, coding, history, health, padhai, advice, kahaniyan, jokes, translation, recipes, sab kuch.
+Language: user jis language mein bole usi mein jawab do (Hindi ho ya Hinglish to Devanagari script mein, English ho to English).
+Jawab bolkar sunaya jayega, isliye emoji, markdown, bullet ya symbols mat use karo. Saral sentences likho.
+Chhote sawal ka jawab 1-3 vaakya mein. Samjhane, kahani, step-by-step wale sawal mein zaroorat ke hisab se lamba (max 8 vaakya).
+Agar kuch pata na ho ya pakka na ho to saaf bolo, galat jawab mat banao. Agar bilkul samajh na aaye to bolo "Samajh nahi aaya, dobara bolo."
+Abhi ka samay: ${d.toLocaleString('hi-IN',{dateStyle:'full',timeStyle:'short'})}.
+Devices ki abhi ki halat: Bulb 1 ${st[0]?'ON':'OFF'}, Bulb 2 ${st[1]?'ON':'OFF'}, Bulb 3 ${st[2]?'ON':'OFF'}, Fan ${st[3]?'ON':'OFF'}.
+Agar user bulb ya fan on/off karne ko kahe to "actions" mein likho. dev: 1,2,3 = bulb, 4 = fan, "all" = sab. Warna actions khaali rakho.
+Sirf JSON do: {"mood":"<code>","reply":"<jawab>","actions":[{"dev":1,"on":true}]}
+mood codes: n=neutral h=happy s=sad a=angry l=laugh c=cry u=surprise v=love z=sleepy t=thinking. Jawab ke bhaav ke hisab se mood chuno.`;
+}
+
+async function callOpenAI(messages,tries=2){
+  const key=$('key').value.trim();
+  if(!key){lastErr='API key nahi daali';return null}
+  for(let a=0;a<tries;a++){
+    const ctl=new AbortController();const to=setTimeout(()=>ctl.abort(),25000);
+    try{
+      const r=await fetch('https://api.openai.com/v1/chat/completions',{
+        method:'POST',signal:ctl.signal,
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+key},
+        body:JSON.stringify({model:$('model').value.trim()||'gpt-4o-mini',
+          response_format:{type:'json_object'},temperature:0.7,max_tokens:500,messages})
+      });
+      clearTimeout(to);
+      const j=await r.json().catch(()=>({}));
+      if(r.ok)return j.choices[0].message.content;
+      const m=(j.error&&j.error.message)||('HTTP '+r.status);
+      if(r.status===401)lastErr='API key galat hai (401). '+m;
+      else if(r.status===429)lastErr='Limit/credit khatam (429). platform.openai.com par billing check karo. '+m;
+      else if(r.status===404)lastErr='Model naam galat ya access nahi (404). '+m;
+      else lastErr='API error '+r.status+': '+m;
+      if(r.status<500&&r.status!==429)return null;     // retry sirf server error par
+      if(r.status===429&&/quota/i.test(m))return null; // credit hi nahi hai
+    }catch(e){
+      clearTimeout(to);
+      lastErr=e.name==='AbortError'?'API ne time par jawab nahi diya':'Network/internet problem: '+e.message;
+    }
+    await new Promise(r=>setTimeout(r,800));
+  }
+  return null;
+}
+
+async function askAI(text){
+  history.push({role:'user',content:text});
+  history=history.slice(-14);
+  const raw=await callOpenAI([{role:'system',content:buildSys()},...history]);
+  if(raw==null){history.pop();return null}
+  let o;
+  try{o=JSON.parse(raw)}catch(e){o={mood:'n',reply:raw,actions:[]}}
+  if(!o.reply||typeof o.reply!=='string'){history.pop();lastErr='Khaali jawab aaya';return null}
+  if(!faces[o.mood])o.mood='n';
+  history.push({role:'assistant',content:o.reply});
+  return o;
+}
+
+function runActions(list){
+  if(!Array.isArray(list))return;
+  list.forEach(a=>{
+    if(!a)return;const on=!!a.on;
+    if(a.dev==='all')allDev(on);
+    else{const i=parseInt(a.dev)-1;if(i>=0&&i<4)setDev(i,on)}
+  });
+}
+
+async function testKey(){
+  log('API test ho raha hai...','sys');
+  const raw=await callOpenAI([{role:'system',content:'Reply only JSON {"ok":true}'},{role:'user',content:'test'}],1);
+  if(raw)log('✅ API key sahi chal rahi hai','sys');else log('❌ '+lastErr,'err');
+}
+
+// ================= Main flow =================
+let busy=false, assistantOn=false, rec=null;
+
+async function handle(text){
+  if(!text.trim())return;
+  busy=true;if(rec)try{rec.abort()}catch(e){}
+  log('Aap: '+text,'me');
+  try{
+    const lc=localCmd(text);
+    if(lc){log('Robot: '+lc.msg,'bot');await speak(lc.msg,lc.m)}
+    else{
+      setMood('t');
+      const o=await askAI(text);
+      if(o){
+        runActions(o.actions);
+        log('Robot: '+o.reply,'bot');
+        await speak(o.reply,o.mood);
+      }else{
+        log('⚠ AI nahi chala: '+lastErr,'err');
+        const f=await fallback(text);
+        if(f){log('Robot: '+f,'bot');await speak(f,'h')}
+        else{const m='Samajh nahi aaya';log('Robot: '+m,'bot');await speak(m,'s')}
+      }
+    }
+  }catch(e){
+    log('Error: '+e.message,'err');
+    await speak('Samajh nahi aaya','s');
+  }
+  busy=false;
+  if(assistantOn)startRec();else setMood('n');
+}
+function sendText(){const v=$('txt').value;$('txt').value='';handle(v)}
+
+// ================= Speech in =================
+function startRec(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){alert('Is browser mein voice recognition nahi hai. Chrome use karo.');assistantOn=false;paintV();return}
+  if(busy)return;
+  rec=new SR();rec.lang='hi-IN';rec.interimResults=false;rec.continuous=false;
+  rec.onstart=()=>{if(!busy)setMood('e')};
+  rec.onresult=e=>handle(e.results[0][0].transcript);
+  rec.onerror=e=>{if(e.error==='not-allowed'){assistantOn=false;paintV();log('Mic permission do','sys')}};
+  rec.onend=()=>{if(assistantOn&&!busy)setTimeout(startRec,300)};
+  try{rec.start()}catch(e){}
+}
+function toggleAssistant(){
+  assistantOn=!assistantOn;paintV();
+  if(assistantOn)startRec();else{try{rec&&rec.abort()}catch(e){}setMood('n')}
+}
+function paintV(){
+  $('vBtn').textContent='🎤 Voice Assistant: '+(assistantOn?'ON':'OFF');
+  $('vBtn').classList.toggle('live',assistantOn);
+}
+
+// ================= init =================
+$('key').value=localStorage.getItem('oaikey')||'';
+$('model').value=localStorage.getItem('oaimodel')||'gpt-4o-mini';
+paint();
+log('Pehle "API key test karo" dabao. Phir Bluetooth connect karke Voice Assistant ON karo aur kuch bhi poochho.','sys');
+</script>
+</body>
+      </html>
